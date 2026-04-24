@@ -8,8 +8,9 @@
     <meta http-equiv="Pragma" content="no-cache">
     <meta http-equiv="Expires" content="0">
     <title>ESP32 AI Configuration Tool v4.1.0</title>
-    <!-- Tesseract.js for in-browser OCR digit detection -->
-    <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+    <!-- TensorFlow.js + TFLite runtime for in-browser digit detection -->
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@latest/dist/tf.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-tflite@0.0.1-alpha.10/dist/tf-tflite.min.js"></script>
     <style>
         body {
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
@@ -449,8 +450,8 @@
                 <button class="btn btn-primary" style="width: 100%; margin-bottom: 6px;" id="btn-auto-detect"
                     onclick="startAutoDetect()">🔍 Auto-Detect Digits</button>
                 <div style="display:flex; align-items:center; gap:6px; margin-bottom:8px;">
-                    <label for="conf-threshold" style="font-size:0.8em; white-space:nowrap;">Min confidence %:</label>
-                    <input id="conf-threshold" type="number" min="1" max="100" step="5" value="50"
+                    <label for="conf-threshold" style="font-size:0.8em; white-space:nowrap;">Min confidence (0–1):</label>
+                    <input id="conf-threshold" type="number" min="0.1" max="1.0" step="0.05" value="0.70"
                         style="width:56px; font-size:0.85em; padding:2px 4px;">
                 </div>
                 <div id="auto-detect-status" style="font-size:0.8em; color:#888; margin-bottom:8px; min-height:16px;"></div>
@@ -515,96 +516,167 @@
             force43: false
         };
 
-        // ---------- Auto-detect state (Tesseract.js OCR) ----------
-        let _tessWorker = null;     // reused across scans
-        let _detectedZones = [];    // [{x,y,w,h,digit,conf,patchData,patchW,patchH,selected}]
+        // ---------- Auto-detect state (TFLite sliding-window) ----------
+        const MODEL_INPUT_W = 20;   // model tensor width
+        const MODEL_INPUT_H = 32;   // model tensor height
+        const MODEL_PATH = 'digit_recognizer_v23_10cls_RGB.tflite';
 
-        async function ensureTessWorker(statusEl) {
-            if (_tessWorker) return _tessWorker;
-            if (statusEl) statusEl.textContent = 'Loading OCR engine… (first use ~5 MB download)';
-            _tessWorker = await Tesseract.createWorker('eng', 1, {
-                logger: m => {
-                    if (statusEl && (m.status === 'loading tesseract core' ||
-                            m.status === 'loading language traineddata' ||
-                            m.status === 'initializing tesseract')) {
-                        statusEl.textContent = `${m.status}: ${Math.round((m.progress || 0) * 100)}%`;
-                    }
+        let _tfliteModel = null;
+        let _detectedZones = [];
+        let _detectAbort = false;
+
+        // Ensure tflite WASM is fetched from CDN
+        if (typeof tflite !== 'undefined') {
+            tflite.setWasmPath('https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-tflite@0.0.1-alpha.10/wasm/');
+        }
+
+        async function ensureModel(statusEl) {
+            if (_tfliteModel) return _tfliteModel;
+            if (statusEl) statusEl.textContent = 'Loading model…';
+            try {
+                _tfliteModel = await tflite.loadTFLiteModel(MODEL_PATH);
+                if (statusEl) statusEl.textContent = 'Model ready.';
+            } catch (e) {
+                if (statusEl) statusEl.textContent = 'Model load failed – serve over HTTP (not file://).';
+                console.error('TFLite load error:', e);
+                throw e;
+            }
+            return _tfliteModel;
+        }
+
+        function predictPatch(model, rgbaData) {
+            const floatBuf = new Float32Array(MODEL_INPUT_H * MODEL_INPUT_W * 3);
+            for (let i = 0; i < MODEL_INPUT_H * MODEL_INPUT_W; i++) {
+                floatBuf[i * 3 + 0] = rgbaData[i * 4 + 0] / 255.0;
+                floatBuf[i * 3 + 1] = rgbaData[i * 4 + 1] / 255.0;
+                floatBuf[i * 3 + 2] = rgbaData[i * 4 + 2] / 255.0;
+            }
+            const inputTensor = tf.tensor4d(floatBuf, [1, MODEL_INPUT_H, MODEL_INPUT_W, 3]);
+            let output;
+            try { output = model.predict(inputTensor); }
+            finally { inputTensor.dispose(); }
+            const probs = output.dataSync();
+            output.dispose();
+            let maxIdx = 0, maxVal = probs[0];
+            for (let k = 1; k < probs.length; k++) {
+                if (probs[k] > maxVal) { maxVal = probs[k]; maxIdx = k; }
+            }
+            return { digit: maxIdx, conf: maxVal };
+        }
+
+        function iou(a, b) {
+            const ix1 = Math.max(a.x, b.x), iy1 = Math.max(a.y, b.y);
+            const ix2 = Math.min(a.x + a.w, b.x + b.w), iy2 = Math.min(a.y + a.h, b.y + b.h);
+            const inter = Math.max(0, ix2 - ix1) * Math.max(0, iy2 - iy1);
+            if (inter === 0) return 0;
+            return inter / (a.w * a.h + b.w * b.h - inter);
+        }
+
+        function nms(detections, iouThresh) {
+            const sorted = [...detections].sort((a, b) => b.conf - a.conf);
+            const kept = [], suppressed = new Set();
+            for (let i = 0; i < sorted.length; i++) {
+                if (suppressed.has(i)) continue;
+                kept.push(sorted[i]);
+                for (let j = i + 1; j < sorted.length; j++) {
+                    if (!suppressed.has(j) && iou(sorted[i], sorted[j]) > iouThresh)
+                        suppressed.add(j);
                 }
-            });
-            await _tessWorker.setParameters({ tessedit_char_whitelist: '0123456789' });
-            if (statusEl) statusEl.textContent = 'OCR engine ready.';
-            return _tessWorker;
+            }
+            return kept;
         }
 
         async function startAutoDetect() {
             if (!state.image) { alert('Load an image first.'); return; }
             if (!state.roi) { alert('Draw a Camera ROI (blue box) first, then switch to Digit Zones mode.'); return; }
+            if (typeof tflite === 'undefined') {
+                alert('TFLite runtime not available. Serve index.html over HTTP (not file://).');
+                return;
+            }
 
             const statusEl  = document.getElementById('auto-detect-status');
             const overlayEl = document.getElementById('detect-modal-overlay');
             const progressEl = document.getElementById('detect-progress');
             const listEl    = document.getElementById('detect-zone-list');
             const btn       = document.getElementById('btn-auto-detect');
-            const CONF_MIN  = parseFloat(document.getElementById('conf-threshold').value) || 50; // 0–100
+            const CONF_THRESHOLD = parseFloat(document.getElementById('conf-threshold').value) || 0.70;
 
             _detectedZones = [];
+            _detectAbort = false;
             listEl.innerHTML = '';
-            if (btn) { btn.disabled = true; btn.textContent = '⏳ Recognizing…'; }
+            if (btn) { btn.disabled = true; btn.textContent = '⏳ Scanning…'; }
 
-            let worker;
+            let model;
             try {
-                worker = await ensureTessWorker(statusEl);
+                model = await ensureModel(statusEl);
             } catch (e) {
-                console.error('Tesseract worker error:', e);
-                if (statusEl) statusEl.textContent = 'OCR engine failed to load — check console.';
                 if (btn) { btn.disabled = false; btn.textContent = '🔍 Auto-Detect Digits'; }
                 return;
             }
 
-            // Crop the ROI to an offscreen canvas for Tesseract
             const roi = state.roi;
             const offscreen = document.createElement('canvas');
             offscreen.width  = roi.w;
             offscreen.height = roi.h;
             const octx = offscreen.getContext('2d');
             octx.drawImage(canvas, roi.x, roi.y, roi.w, roi.h, 0, 0, roi.w, roi.h);
+            const pixels = octx.getImageData(0, 0, roi.w, roi.h).data;
 
-            if (statusEl) statusEl.textContent = `Running OCR on ${roi.w}×${roi.h}px region…`;
+            const strideX = Math.max(2, Math.round(MODEL_INPUT_W * 0.50));
+            const strideY = Math.max(2, Math.round(MODEL_INPUT_H * 0.50));
+            const totalX = Math.floor((roi.w - MODEL_INPUT_W) / strideX) + 1;
+            const totalY = Math.floor((roi.h - MODEL_INPUT_H) / strideY) + 1;
+            const total  = totalX * totalY;
+            if (statusEl) statusEl.textContent = `Scanning ${roi.w}×${roi.h}px — ${total} patches…`;
+            await tf.nextFrame();
 
-            let result;
-            try {
-                result = await worker.recognize(offscreen);
-            } catch (e) {
-                console.error('Tesseract recognize error:', e);
-                if (statusEl) statusEl.textContent = 'Recognition failed — check console.';
-                if (btn) { btn.disabled = false; btn.textContent = '🔍 Auto-Detect Digits'; }
-                return;
+            const rawDetections = [];
+            let scanned = 0;
+            const patchBuf = new Uint8ClampedArray(MODEL_INPUT_W * MODEL_INPUT_H * 4);
+
+            for (let sy = 0; sy <= roi.h - MODEL_INPUT_H && !_detectAbort; sy += strideY) {
+                for (let sx = 0; sx <= roi.w - MODEL_INPUT_W && !_detectAbort; sx += strideX) {
+                    for (let py = 0; py < MODEL_INPUT_H; py++) {
+                        const srcRow = ((sy + py) * roi.w + sx) * 4;
+                        const dstRow = py * MODEL_INPUT_W * 4;
+                        for (let c = 0; c < MODEL_INPUT_W * 4; c++)
+                            patchBuf[dstRow + c] = pixels[srcRow + c];
+                    }
+                    const { digit, conf } = predictPatch(model, patchBuf);
+                    if (conf >= CONF_THRESHOLD) {
+                        rawDetections.push({
+                            x: roi.x + sx, y: roi.y + sy,
+                            w: MODEL_INPUT_W, h: MODEL_INPUT_H,
+                            digit, conf,
+                            patchData: new Uint8ClampedArray(patchBuf),
+                            patchW: MODEL_INPUT_W, patchH: MODEL_INPUT_H
+                        });
+                    }
+                    scanned++;
+                    if (scanned % 20 === 0) {
+                        if (statusEl) statusEl.textContent =
+                            `Scanning… ${Math.round(scanned / total * 100)}% · ${rawDetections.length} candidate(s)`;
+                        await tf.nextFrame();
+                    }
+                }
             }
 
             if (btn) { btn.disabled = false; btn.textContent = '🔍 Auto-Detect Digits'; }
 
-            // result.data.symbols gives per-character bounding boxes + confidence
-            const symbols = result.data.symbols || [];
-            const validZones = symbols
-                .filter(s => /^[0-9]$/.test(s.text) && s.confidence >= CONF_MIN)
-                .map(s => {
-                    const bx = s.bbox.x0, by = s.bbox.y0;
-                    const bw = Math.max(1, s.bbox.x1 - s.bbox.x0);
-                    const bh = Math.max(1, s.bbox.y1 - s.bbox.y0);
-                    // Extract thumbnail from ROI canvas at the detected bbox
-                    const pc = document.createElement('canvas');
-                    pc.width = bw; pc.height = bh;
-                    pc.getContext('2d').drawImage(offscreen, bx, by, bw, bh, 0, 0, bw, bh);
-                    const patchData = pc.getContext('2d').getImageData(0, 0, bw, bh).data;
-                    return {
-                        x: roi.x + bx, y: roi.y + by, w: bw, h: bh,
-                        digit: s.text,
-                        conf: s.confidence / 100,
-                        patchData: new Uint8ClampedArray(patchData),
-                        patchW: bw, patchH: bh,
-                        selected: true
-                    };
-                });
+            if (_detectAbort) {
+                if (statusEl) statusEl.textContent = 'Scan cancelled.';
+                return;
+            }
+
+            const afterNMS = nms(rawDetections, 0.30);
+            afterNMS.sort((a, b) => a.x - b.x);
+            _detectedZones = afterNMS.map(d => ({ ...d, selected: true }));
+
+            if (statusEl) statusEl.textContent = `Found ${_detectedZones.length} zone(s) — review below.`;
+            progressEl.textContent = `Found ${_detectedZones.length} candidate zone(s). Select the ones to keep.`;
+            renderDetectList();
+            overlayEl.classList.add('visible');
+        }
 
             // Sort left-to-right
             validZones.sort((a, b) => a.x - b.x);
@@ -628,21 +700,14 @@
             _detectedZones.forEach((z, i) => {
                 const row = document.createElement('div');
                 row.className = 'detect-zone-row' + (z.selected ? ' selected' : '');
-                row.onclick = () => {
-                    _detectedZones[i].selected = !_detectedZones[i].selected;
-                    renderDetectList();
-                };
+                row.onclick = () => { _detectedZones[i].selected = !_detectedZones[i].selected; renderDetectList(); };
 
-                // Thumbnail canvas — use actual patch dimensions
-                const pw = z.patchW || z.w;
-                const ph = z.patchH || z.h;
+                const pw = z.patchW || MODEL_INPUT_W;
+                const ph = z.patchH || MODEL_INPUT_H;
                 const thumb = document.createElement('canvas');
                 thumb.className = 'detect-zone-swatch';
-                thumb.width = pw;
-                thumb.height = ph;
-                const tctx = thumb.getContext('2d');
-                const id = new ImageData(z.patchData, pw, ph);
-                tctx.putImageData(id, 0, 0);
+                thumb.width = pw; thumb.height = ph;
+                thumb.getContext('2d').putImageData(new ImageData(z.patchData, pw, ph), 0, 0);
 
                 const digitSpan = document.createElement('div');
                 digitSpan.className = 'detect-zone-digit';
@@ -684,6 +749,7 @@
         }
 
         function closeDetectModal() {
+            _detectAbort = true;
             document.getElementById('detect-modal-overlay').classList.remove('visible');
         }
         // ---------- End auto-detect ----------

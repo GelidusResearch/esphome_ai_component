@@ -44,7 +44,7 @@ CONF_DEBUG_OUT_PROCESSED_IMAGE_TO_SERIAL = 'debug_image_out_serial'
 CONF_DEBUG_MEMORY = 'debug_memory'
 CONF_VALIDATOR = 'validator'
 
-# CONF_MODEL_TYPE = 'model_type' 
+# CONF_MODEL_TYPE = 'model_type'
 CONF_PREVIEW = 'preview_camera'
 CONF_GENERATE_PREVIEW = 'generate_preview'
 CONF_START_FLASH_CALIBRATION_BUTTON = 'start_flash_calibration_button'
@@ -92,13 +92,13 @@ CONFIG_SCHEMA = cv.Schema({
         min=0.0, max=1.0
     ),
     # Make tensor_arena_size optional since it's now in model_config.h
-    cv.Optional(CONF_TENSOR_ARENA_SIZE): cv.All( 
+    cv.Optional(CONF_TENSOR_ARENA_SIZE): cv.All(
         datasize_to_bytes,
         cv.Range(min=50 * 1024, max=1000 * 1024)
     ),
     cv.GenerateID(CONF_RAW_DATA_ID): cv.declare_id(cg.uint8),
-    cv.Optional(CONF_DEBUG, default=False): cv.boolean, 
-    cv.Optional(CONF_DEBUG_IMAGE, default=False): cv.boolean, 
+    cv.Optional(CONF_DEBUG, default=False): cv.boolean,
+    cv.Optional(CONF_DEBUG_IMAGE, default=False): cv.boolean,
     cv.Optional(CONF_DEBUG_OUT_PROCESSED_IMAGE_TO_SERIAL, default=False): cv.boolean,
     cv.Optional(CONF_DEBUG_MEMORY, default=False): cv.boolean,
     cv.Optional("tensor_arena_size_sensor"): cv.use_id(sensor.Sensor),
@@ -127,7 +127,7 @@ CONFIG_SCHEMA = cv.Schema({
     # ),
     # cv.Optional(CONF_AUTO_CAMERA_WINDOW, default=False): cv.boolean,
     cv.Optional(CONF_FRAME_REQUEST_TIMEOUT, default=15000): cv.int_range(min=1000, max=60000),
-    
+
     cv.Optional("value_sensor"): cv.use_id(sensor.Sensor),
     cv.Optional("confidence_sensor"): cv.use_id(sensor.Sensor),
     cv.Optional("inference_logs"): cv.use_id(text_sensor.TextSensor),
@@ -155,17 +155,17 @@ async def to_code(config):
     #     # ref="~1.3.4" #https://github.com/espressif/esp-tflite-micro/issues/120
     #     ref="1.3.4" # fix to 1.3.4 cause 1.3.5 has bug
     # )
-    
+
     # esp32.add_idf_component(
     #     name="espressif/esp-nn",
     #     ref="~1.1.2"
     # )
-    
+
     # esp32.add_idf_component(
     #     name="espressif/esp_new_jpeg",
     #     ref="1.0.0"
     # )
-        
+
     # cg.add_build_flag("-DTF_LITE_STATIC_MEMORY")
     # cg.add_build_flag("-DTF_LITE_DISABLE_X86_NEON")
     # cg.add_build_flag("-DESP_NN")
@@ -176,9 +176,9 @@ async def to_code(config):
     cg.add_global(cg.RawStatement('#include "esphome/components/meter_reader_tflite/meter_reader_tflite.h"'))
     cg.add_global(cg.RawStatement('using namespace esphome::meter_reader_tflite;'))
     await cg.register_component(var, config)
-    
+
     cg.add_define("USE_METER_READER_TFLITE")
-    
+
     # Register validator
     if CONF_VALIDATOR in config:
         cg.add_define("USE_VALUE_VALIDATOR")
@@ -193,29 +193,29 @@ async def to_code(config):
         cg.add_define("USE_HOST")
         # On host, we don't set a real camera object.
         pass
-    
+
     model_path = CORE.relative_config_path(config[CONF_MODEL])
     model_filename = os.path.basename(str(model_path).replace("\\", "/"))
     model_type = os.path.splitext(model_filename)[0]  # Remove .tflite extension
-       
+
     # Set model type from extracted filename
     cg.add(var.set_model_config(model_type))
-    
+
     # Read the model file as binary data
     with open(model_path, "rb") as f:
         model_data = f.read()
-        
+
     # Compute CRC32
     crc32_val = zlib.crc32(model_data) & 0xFFFFFFFF
-    cg.add_define("MODEL_CRC32", HexInt(crc32_val)) 
-    
+    cg.add_define("MODEL_CRC32", HexInt(crc32_val))
+
     # Create a progmem array for the model data
     rhs = [HexInt(x) for x in model_data]
     prog_arr = cg.progmem_array(config[CONF_RAW_DATA_ID], rhs)
-    
+
     cg.add(var.set_model(prog_arr, len(model_data)))
     cg.add(var.set_confidence_threshold(config[CONF_CONFIDENCE_THRESHOLD]))
-    
+
     # Set tensor arena size - use config value if provided, otherwise use default
     # The actual size will be determined from model_config.h in the C++ code
     if CONF_TENSOR_ARENA_SIZE in config:
@@ -225,7 +225,7 @@ async def to_code(config):
     # else:
         # # Default will be handled in the C++ code based on model type from model_config.h
         # cg.add(var.set_tensor_arena_size(512 * 1024))  # 512KB default fallback
-    
+
     # Get camera resolution from substitutions
     width, height = 640, 480  # Defaults
     substitutions = CORE.config.get("substitutions", {})
@@ -233,10 +233,10 @@ async def to_code(config):
         res = substitutions["camera_resolution"]
         if 'x' in res:
             width, height = map(int, res.split('x'))
-    
+
     pixel_format = substitutions.get("camera_pixel_format", "RGB888")
     cg.add(var.set_camera_image_format(width, height, pixel_format))
-    
+
     # Find esp32_camera_utils instance to allow updating its helper sensors and for rotation detection
     camera_utils_id = None
     if 'esp32_camera_utils' in CORE.config:
@@ -244,7 +244,7 @@ async def to_code(config):
         # Handle list if multiple instances (though usually singleton or first one)
         if isinstance(conf, list) and len(conf) > 0:
             conf = conf[0]
-            
+
         if CONF_ID in conf:
             camera_utils_id = conf[CONF_ID]
 
@@ -255,53 +255,53 @@ async def to_code(config):
     # Auto-enable rotation if esp32_camera_utils is present
     if camera_utils_id is not None:
         cg.add_define("DEV_ENABLE_ROTATION")
-    
+
     cg.add_define("USE_SERVICE_DEBUG")
 
     if config.get(CONF_DEBUG_IMAGE, False):
         cg.add_define("DEBUG_METER_READER_TFLITE")
         cg.add(var.set_debug_mode(True))
-        
+
         cg.add(var.set_camera_image_format(640, 480, "JPEG"))
-        
+
         component_dir = os.path.dirname(os.path.abspath(__file__))
         debug_image_path = os.path.join(component_dir, "debug.jpg")
-        
+
         if not os.path.exists(debug_image_path):
             raise cv.Invalid(f"Debug image not found at {debug_image_path}")
         else:
             with open(debug_image_path, "rb") as f:
                 debug_image_data = f.read()
-        
+
         debug_image_id = f"{config[CONF_ID]}_debug_image"
         cg.add_global(
             cg.RawStatement(
                f"static const uint8_t {debug_image_id}[] = {{{', '.join(f'0x{x:02x}' for x in debug_image_data)}}};"
             )
         )
-        
+
         cg.add(
             var.set_debug_image(
                 cg.RawExpression(debug_image_id),
                 len(debug_image_data)
             )
         )
-        
+
     if config.get(CONF_DEBUG, False):
         cg.add_define("DEBUG_METER_READER_TFLITE")
         cg.add(var.set_debug_mode(True))
         cg.add(var.set_debug(True))
-        
+
     if config.get(CONF_DEBUG_OUT_PROCESSED_IMAGE_TO_SERIAL, False):
         cg.add_define("DEBUG_OUT_PROCESSED_IMAGE_TO_SERIAL")
-     
+
     if config.get(CONF_GENERATE_PREVIEW, False):
         cg.add(var.set_generate_preview(True))
-        
+
     if config.get(CONF_DEBUG_MEMORY, False):
         cg.add_define("DEBUG_METER_READER_MEMORY")
         cg.add(var.set_debug_memory_enabled(True))
-        
+
         # Helper to create and register a sensor
         async def create_sensor(name, unit, accuracy_decimals=0, icon="mdi:memory"):
             # Create a manual ID for the new sensor
@@ -315,10 +315,10 @@ async def to_code(config):
                 CONF_FORCE_UPDATE: False,
                 CONF_ENTITY_CATEGORY: cv.entity_category("diagnostic"),
             }
-            
+
             # sens = await sensor.new_sensor(sens_conf)
             sens = await sensor.new_sensor(sens_conf)
-            
+
             cg.add(sens.set_unit_of_measurement(unit))
             cg.add(sens.set_accuracy_decimals(accuracy_decimals))
             # Icon is set via config now
@@ -327,15 +327,15 @@ async def to_code(config):
         # Tensor Arena Size
         s = await create_sensor("tensor_arena_size", "B", 0)
         cg.add(var.set_tensor_arena_size_sensor(s))
-        
+
         # Tensor Arena Used
         s = await create_sensor("tensor_arena_used", "B", 0)
         cg.add(var.set_tensor_arena_used_sensor(s))
-        
+
         # Process Free Heap
         s = await create_sensor("process_free_heap", "B", 0)
         cg.add(var.set_process_free_heap_sensor(s))
-        
+
         # Process Free PSRAM
         s = await create_sensor("process_free_psram", "B", 0)
         cg.add(var.set_process_free_psram_sensor(s))
@@ -346,11 +346,11 @@ async def to_code(config):
     #     preview_cam = cg.new_Pvariable(preview_conf[CONF_ID], var)
     #     await camera_component.register_camera(preview_cam, preview_conf)
     #     cg.add(var.set_preview_camera(preview_cam))
-   
+
     # Check for web_server component to enable preview handler
     if 'web_server' in CORE.config:
         cg.add_define("USE_WEB_SERVER")
-        
+
         # We need the WebServerBase component for add_handler
         # It is usually available as 'web_server_base' in config if web_server is used.
         if 'web_server_base' in CORE.config:
@@ -369,7 +369,7 @@ async def to_code(config):
     # Handle crop zones (either global or local)
     if CONF_CROP_ZONES in config:
         crop_global = await cg.get_variable(config[CONF_CROP_ZONES])
-        cg.add(var.set_crop_zones_global(crop_global))    
+        cg.add(var.set_crop_zones_global(crop_global))
 
     # Set flash light controller if configured (optional)
     if CONF_FLASH_LIGHT_CONTROLLER in config:
@@ -387,7 +387,7 @@ async def to_code(config):
         if CONF_COLLECT_MIN_DIGIT_CONFIDENCE in config:
             cg.add(var.set_collect_min_digit_confidence(config[CONF_COLLECT_MIN_DIGIT_CONFIDENCE]))
         cg.add_define("USE_DATA_COLLECTOR")
-    
+
     # Handle optional camera window configuration
     # if CONF_CAMERA_WINDOW in config:
     #     window_config = config[CONF_CAMERA_WINDOW]
@@ -396,19 +396,19 @@ async def to_code(config):
     #         offset_y = window_config.get('offset_y', 0)
     #         width = window_config['width']
     #         height = window_config['height']
-            
+
     #         # Store window configuration as member variables
     #         cg.add(var.set_camera_window_offset_x(offset_x))
     #         cg.add(var.set_camera_window_offset_y(offset_y))
     #         cg.add(var.set_camera_window_width(width))
     #         cg.add(var.set_camera_window_height(height))
-    #         cg.add(var.set_camera_window_configured(True)) 
+    #         cg.add(var.set_camera_window_configured(True))
 
 
     # Set timeout parameters
     if CONF_FRAME_REQUEST_TIMEOUT in config:
         cg.add(var.set_frame_request_timeout(config[CONF_FRAME_REQUEST_TIMEOUT]))
-        
+
 
     # Optional: Debug memory sensors
     sensor_keys = [
@@ -422,20 +422,20 @@ async def to_code(config):
             sens = await cg.get_variable(config[key])
             setter_name = f"set_{key}"
             cg.add(getattr(var, setter_name)(sens))
-    
-    
+
+
     if "value_sensor" in config:
         value_sensor = await cg.get_variable(config["value_sensor"])
         cg.add(var.set_value_sensor(value_sensor))
-    
+
     if "confidence_sensor" in config:
         confidence_sensor = await cg.get_variable(config["confidence_sensor"])
         cg.add(var.set_confidence_sensor(confidence_sensor))
-    
+
     if "inference_logs" in config:
         inference_logs = await cg.get_variable(config["inference_logs"])
         cg.add(var.set_inference_logs(inference_logs))
-    
+
     if "main_logs" in config:
         main_logs = await cg.get_variable(config["main_logs"])
         cg.add(var.set_main_logs(main_logs))
@@ -466,8 +466,7 @@ async def to_code(config):
     if CONF_UNLOAD_BUTTON in config:
         b = await cg.get_variable(config[CONF_UNLOAD_BUTTON])
         cg.add(var.set_unload_button(b))
-    
+
     if CONF_RELOAD_BUTTON in config:
         b = await cg.get_variable(config[CONF_RELOAD_BUTTON])
         cg.add(var.set_reload_button(b))
-
